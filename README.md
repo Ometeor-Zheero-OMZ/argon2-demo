@@ -159,7 +159,6 @@ pub async fn login(
             // if verified, create a token
             match jwt::create_token(&req.name, id) {
                 Ok(token) => {
-                    // ユーザー情報を作成
                     let user_data = User {
                         id,
                         name: req.name.clone(),
