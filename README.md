@@ -88,7 +88,7 @@ pub async fn signup(
     // argon2 password hashing logic
     let argon2 = Argon2::default();
     let salt = SaltString::generate(&mut OsRng);
-    let hashed_password = argon2.hash_password(&req.password.as_bytes(), &salt) {
+    let hashed_password = match argon2.hash_password(&req.password.as_bytes(), &salt) {
         Ok(hash) => hash.to_string(),
         Err(err) => {
             logger::log(logger::Header::ERROR, &err.to_string());
@@ -101,13 +101,81 @@ pub async fn signup(
         "INSERT INTO users (name, password, email) VALUES ($1, $2, $3)",
         &[&req.name, &hashed_password, &req.email]
     ).await {
-        Ok(row) => {
-            logger::log(logger::Header::SUCCESS, "Successfully signed up")
+        Ok(_) => {
+            logger::log(logger::Header::SUCCESS, "Successfully signed up");
             return HttpResponse::Ok().finish();
+        },
+        Err(ref err) if err.code() == Some(&SqlState::UNIQUE_VIOLATION) => {
+            logger::log(logger::Header::ERROR, "name already exists");
+            HttpResponse::BadRequest().body("name already exists")
         },
         Err(err) => {
             logger::log(logger::Header::ERROR, &err.to_string());
             return HttpResponse::InternalServerError().finish();
+        }
+    }
+}
+```
+
+### login logic
+
+```Rust
+#[derive(Serialize, Deserialize, Debug)]
+pub struct LoginRequest {
+    name: String,
+    password: String,
+}
+
+pub async fn login(
+    req: web::Json<LoginRequest>,
+    pool: web::Data<Pool<PostgresConnectionManager<NoTls>>>
+) -> impl Responder {
+    let conn = pool.get().await.unwrap();
+
+    let rows = conn.query(
+        "SELECT id, name, password FROM users WHERE name = $1;",
+        &[&req.name]
+    ).await.unwrap();
+
+    if rows.is_empty() {
+        return HttpResponse::Unauthorized().finish();
+    }
+
+    let password: String = rows.get(0).unwrap().get("password");
+    let id: i32 = rows.get(0).unwrap().get("id");
+
+    let argon2 = Argon2::default();
+    let parsed_hash = match PasswordHash::new(&password) {
+        Ok(hash) => hash,
+        Err(_) => {
+            logger::log(logger::Header::ERROR, "Failed hashing a password");
+            return HttpResponse::InternalServerError().finish();
+        }
+    };
+
+    // verify the password you entered
+    match argon2.verify_password(&req.password.as_bytes(), &parsed_hash) {
+        Ok(_) => {
+            // if verified, create a token
+            match jwt::create_token(&req.name, id) {
+                Ok(token) => {
+                    // ユーザー情報を作成
+                    let user_data = User {
+                        id,
+                        name: req.name.clone(),
+                        token,
+                    };
+                    return HttpResponse::Ok().json(user_data);
+                },
+                Err(err) => {
+                    logger::log(logger::Header::ERROR, &err.to_string());
+                    return HttpResponse::InternalServerError().finish();
+                },
+            }
+        },
+        Err(err) => {
+            logger::log(logger::Header::ERROR, &err.to_string());
+            return HttpResponse::new(StatusCode::UNAUTHORIZED);
         }
     }
 }
